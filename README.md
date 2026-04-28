@@ -360,4 +360,5 @@ curl -X POST http://localhost:3001/api/trigger-check
 
 **Custo estimado para 100 usuários**: < R$30/mês
 #   r a d a r - p a s s a g e n s  
+ #   r a d a r - p a s s a g e n s  
  
