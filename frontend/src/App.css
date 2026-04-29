@@ -688,3 +688,95 @@ body {
   .login-card    { padding: 28px 24px; }
   .alert-form, .ai-card, .discovery-card { padding: 20px; }
 }
+
+/* ============================================================
+   FIREBASE AUTH — Login page additions
+   ============================================================ */
+
+.btn-google {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  padding: 11px 16px;
+  background: #fff;
+  border: 1.5px solid var(--slate-200);
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--slate-700);
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: var(--font);
+  box-shadow: var(--shadow-sm);
+  margin-bottom: 16px;
+}
+
+.btn-google:hover    { border-color: var(--slate-300); box-shadow: var(--shadow); background: var(--slate-50); }
+.btn-google:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  color: var(--slate-300);
+  font-size: 12px;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--slate-200);
+}
+
+.auth-divider span { color: var(--slate-400); font-weight: 500; white-space: nowrap; }
+
+.auth-error {
+  padding: 10px 14px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: #b91c1c;
+  text-align: left;
+}
+
+.auth-switch {
+  margin-top: 20px;
+  font-size: 13px;
+  color: var(--slate-500);
+}
+
+/* User menu no header */
+.user-menu {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-left: 8px;
+  border-left: 1px solid var(--slate-200);
+  margin-left: 4px;
+}
+
+.user-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--slate-700);
+}
+
+.btn-logout {
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--slate-200);
+  background: none;
+  color: var(--slate-500);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: var(--font);
+}
+
+.btn-logout:hover { border-color: #fca5a5; color: var(--red); background: #fef2f2; }

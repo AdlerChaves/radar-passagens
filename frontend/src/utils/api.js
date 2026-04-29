@@ -1,10 +1,25 @@
 // src/utils/api.js
+import { auth } from '../firebase/config';
+
 const BASE_URL = process.env.REACT_APP_API_URL || '/api';
 
+// Busca o token JWT do Firebase e injeta no header Authorization
+async function getAuthHeaders() {
+  const user = auth.currentUser;
+  if (!user) return { 'Content-Type': 'application/json' };
+  const token = await user.getIdToken();
+  return {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${token}`,
+  };
+}
+
 async function request(method, path, body) {
+  const headers = await getAuthHeaders();
+
   const res = await fetch(`${BASE_URL}${path}`, {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
 

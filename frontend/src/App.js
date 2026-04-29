@@ -1,50 +1,54 @@
 // src/App.js
-import { useState, useEffect } from 'react';
+import { useAuth } from './context/AuthContext';
 import Dashboard from './pages/Dashboard';
 import CreateAlert from './pages/CreateAlert';
 import AlertDetails from './pages/AlertDetails';
+import Login from './pages/Login';
+import { useState } from 'react';
 import './App.css';
 
 export default function App() {
+  const { isAuthenticated, isLoading, dbUser, logout } = useAuth();
   const [page, setPage] = useState('dashboard');
   const [selectedSearch, setSelectedSearch] = useState(null);
-  const [user, setUser] = useState(() => {
-    const saved = localStorage.getItem('radar_user');
-    if (!saved) return null;
-    try {
-      const data = JSON.parse(saved);
-      // Expira após 7 dias
-      const age = Date.now() - (data._savedAt || 0);
-      if (age > 7 * 24 * 60 * 60 * 1000) {
-        localStorage.removeItem('radar_user');
-        return null;
-      }
-      return data;
-    } catch {
-      return null;
-    }
-  });
 
   function navigate(to, data = null) {
     setPage(to);
     if (data) setSelectedSearch(data);
   }
 
-  function handleUserSet(u) {
-    const payload = { ...u, _savedAt: Date.now() };
-    setUser(payload);
-    localStorage.setItem('radar_user', JSON.stringify(payload));
+  // Aguarda o Firebase resolver a sessão antes de renderizar
+  if (isLoading) {
+    return (
+      <div className="app">
+        <div className="main">
+          <div className="loading">Carregando...</div>
+        </div>
+      </div>
+    );
   }
 
+  // Não autenticado → tela de login
+  if (!isAuthenticated) {
+    return (
+      <div className="app">
+        <main className="main">
+          <Login />
+        </main>
+      </div>
+    );
+  }
+
+  // Autenticado → app completo
   return (
     <div className="app">
-      <Header user={user} onNavigate={navigate} currentPage={page} />
+      <Header user={dbUser} onNavigate={navigate} currentPage={page} onLogout={logout} />
       <main className="main">
         {page === 'dashboard' && (
-          <Dashboard user={user} onSetUser={handleUserSet} onNavigate={navigate} />
+          <Dashboard user={dbUser} onNavigate={navigate} />
         )}
         {page === 'create' && (
-          <CreateAlert user={user} onNavigate={navigate} />
+          <CreateAlert user={dbUser} onNavigate={navigate} />
         )}
         {page === 'details' && selectedSearch && (
           <AlertDetails search={selectedSearch} onNavigate={navigate} />
@@ -54,7 +58,7 @@ export default function App() {
   );
 }
 
-function Header({ user, onNavigate, currentPage }) {
+function Header({ user, onNavigate, currentPage, onLogout }) {
   return (
     <header className="header">
       <button className="logo" onClick={() => onNavigate('dashboard')}>
@@ -65,22 +69,24 @@ function Header({ user, onNavigate, currentPage }) {
       </button>
 
       <nav className="nav">
-        {user && (
-          <>
-            <button
-              className={`nav-btn ${currentPage === 'dashboard' ? 'active' : ''}`}
-              onClick={() => onNavigate('dashboard')}
-            >
-              Meus Alertas
-            </button>
-            <button
-              className="nav-btn primary"
-              onClick={() => onNavigate('create')}
-            >
-              + Novo Alerta
-            </button>
-          </>
-        )}
+        <button
+          className={`nav-btn ${currentPage === 'dashboard' ? 'active' : ''}`}
+          onClick={() => onNavigate('dashboard')}
+        >
+          Meus Alertas
+        </button>
+        <button
+          className="nav-btn primary"
+          onClick={() => onNavigate('create')}
+        >
+          + Novo Alerta
+        </button>
+        <div className="user-menu">
+          <span className="user-name">{user?.name?.split(' ')[0]}</span>
+          <button className="btn-logout" onClick={onLogout} title="Sair">
+            Sair
+          </button>
+        </div>
       </nav>
     </header>
   );
