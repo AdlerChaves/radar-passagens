@@ -1,225 +1,320 @@
 // src/routes/index.js
-const express = require('express');
+const express    = require('express');
 const { v4: uuidv4 } = require('uuid');
-const { db } = require('../config/database');
-const { runPriceCheck } = require('../jobs/priceMonitor');
-const { searchFlight, searchDiscoveryFlights } = require('../services/flightService');
-const { getPriceHistory, calculateStats } = require('../services/priceAnalysisService');
-const { interpretUserInput } = require('../services/aiService');
-const { requireFirebaseAuth } = require('../middleware/firebaseAuth');
+const { firestore }  = require('../config/firestore');
+const { runPriceCheck }                          = require('../jobs/priceMonitor');
+const { searchFlight, searchDiscoveryFlights }   = require('../services/flightService');
+const { getPriceHistory, calculateStats }         = require('../services/priceAnalysisService');
+const { interpretUserInput }                      = require('../services/aiService');
+const { requireFirebaseAuth }                     = require('../middleware/firebaseAuth');
 
 const router = express.Router();
+const IATA_REGEX = /^[A-Z]{3}$/;
 
-// ==========================================
-// AUTH — sincroniza usuário Firebase com o banco local
-// ==========================================
+// ─────────────────────────────────────────────────────────────
+// AUTH — sincroniza usuário Firebase com o Firestore
+// ─────────────────────────────────────────────────────────────
 
-// Chamado pelo frontend logo após o login/registro no Firebase
-// Cria o usuário no banco se não existir, ou retorna o existente
-router.post('/auth/sync', requireFirebaseAuth, (req, res) => {
-  const { name, email } = req.body;
-  const firebaseUid = req.firebaseUid;
+router.post('/auth/sync', requireFirebaseAuth, async (req, res) => {
+  try {
+    const { name, email } = req.body;
+    const firebaseUid     = req.firebaseUid;
 
-  if (!email) return res.status(400).json({ error: 'Email obrigatório' });
+    if (!email) return res.status(400).json({ error: 'Email obrigatório' });
 
-  // Tenta buscar por firebase_uid primeiro, depois por email (migração)
-  let user = db.prepare('SELECT * FROM users WHERE firebase_uid = ?').get(firebaseUid)
-          || db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    // Usa o UID do Firebase como ID do documento — simples e sem colisão
+    const userRef = firestore.collection('users').doc(firebaseUid);
+    const userDoc = await userRef.get();
 
-  if (!user) {
-    // Novo usuário
-    const id = uuidv4();
-    db.prepare(`
-      INSERT INTO users (id, firebase_uid, name, email)
-      VALUES (?, ?, ?, ?)
-    `).run(id, firebaseUid, name || email.split('@')[0], email);
-    user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
-  } else if (!user.firebase_uid) {
-    // Usuário existente sem firebase_uid — atualiza (migração de contas antigas)
-    db.prepare('UPDATE users SET firebase_uid = ? WHERE id = ?').run(firebaseUid, user.id);
-    user = { ...user, firebase_uid: firebaseUid };
+    let user;
+    if (!userDoc.exists) {
+      user = {
+        id:           firebaseUid,
+        firebase_uid: firebaseUid,
+        name:         name || email.split('@')[0],
+        email,
+        whatsapp:     null,
+        created_at:   new Date().toISOString(),
+      };
+      await userRef.set(user);
+    } else {
+      user = { id: firebaseUid, ...userDoc.data() };
+    }
+
+    res.json(user);
+  } catch (err) {
+    console.error('/auth/sync erro:', err);
+    res.status(500).json({ error: err.message });
   }
-
-  res.json(user);
 });
 
-// ==========================================
+// ─────────────────────────────────────────────────────────────
 // USUÁRIOS
-// ==========================================
+// ─────────────────────────────────────────────────────────────
 
-// Cadastrar ou buscar usuário por email
-router.post('/users', (req, res) => {
-  const { name, email, whatsapp } = req.body;
-
-  if (!name || !email) {
-    return res.status(400).json({ error: 'Nome e email são obrigatórios' });
+router.get('/users/:id', async (req, res) => {
+  try {
+    const doc = await firestore.collection('users').doc(req.params.id).get();
+    if (!doc.exists) return res.status(404).json({ error: 'Usuário não encontrado' });
+    res.json({ id: doc.id, ...doc.data() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  // Verifica se já existe
-  let user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-
-  if (!user) {
-    const id = uuidv4();
-    db.prepare('INSERT INTO users (id, name, email, whatsapp) VALUES (?, ?, ?, ?)').run(id, name, email, whatsapp || null);
-    user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
-  }
-
-  res.json(user);
 });
 
-router.get('/users/:id', (req, res) => {
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
-  if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
-  res.json(user);
-});
+// ─────────────────────────────────────────────────────────────
+// BUSCAS
+// ─────────────────────────────────────────────────────────────
 
-// ==========================================
-// BUSCAS / ALERTAS
-// ==========================================
+// Listar buscas do usuário — com agregados de histórico
+router.get('/searches', async (req, res) => {
+  try {
+    const { userId } = req.query;
 
-// Listar buscas do usuário
-router.get('/searches', (req, res) => {
-  const { userId } = req.query;
+    let query = firestore.collection('searches').orderBy('created_at', 'desc');
+    if (userId) query = query.where('user_id', '==', userId);
 
-  const searches = db.prepare(`
-    SELECT 
-      s.*,
-      (SELECT COUNT(*) FROM price_history WHERE search_id = s.id) as price_checks,
-      (SELECT COUNT(*) FROM alerts_sent WHERE search_id = s.id) as alerts_count,
-      (SELECT price FROM price_history WHERE search_id = s.id ORDER BY checked_at DESC LIMIT 1) as last_price,
-      (SELECT airline FROM price_history WHERE search_id = s.id ORDER BY checked_at DESC LIMIT 1) as last_airline,
-      (SELECT stops FROM price_history WHERE search_id = s.id ORDER BY checked_at DESC LIMIT 1) as last_stops,
-      (SELECT MIN(price) FROM price_history WHERE search_id = s.id) as min_price
-    FROM searches s
-    ${userId ? 'WHERE s.user_id = ?' : ''}
-    ORDER BY s.created_at DESC
-  `).all(userId ? [userId] : []);
+    const snap     = await query.get();
+    const searches = snap.docs.map(d => ({ id: d.id, ...d.data() }));
 
-  res.json(searches);
+    // Enriquece cada busca com dados do histórico de preços
+    const enriched = await Promise.all(searches.map(async search => {
+      const histSnap = await firestore
+        .collection('price_history')
+        .where('search_id', '==', search.id)
+        .orderBy('checked_at', 'desc')
+        .limit(30)
+        .get();
+
+      const history = histSnap.docs.map(d => d.data());
+
+      const last      = history[0] || null;
+      const prices    = history.map(h => h.price);
+      const min_price = prices.length ? Math.min(...prices) : null;
+
+      const alertSnap = await firestore
+        .collection('alerts_sent')
+        .where('search_id', '==', search.id)
+        .get();
+
+      return {
+        ...search,
+        price_checks:  history.length,
+        alerts_count:  alertSnap.size,
+        last_price:    last?.price    || null,
+        last_airline:  last?.airline  || null,
+        last_stops:    last?.stops    ?? null,
+        min_price,
+      };
+    }));
+
+    res.json(enriched);
+  } catch (err) {
+    console.error('/searches GET erro:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Criar busca
-router.post('/searches', (req, res) => {
-  const {
-    userId, origin, destination, destinationLabel,
-    travelDate, dateFlexibility, preference,
-    isDiscoveryMode, maxPrice
-  } = req.body;
+router.post('/searches', async (req, res) => {
+  try {
+    const {
+      userId, origin, destination, destinationLabel,
+      travelDate, dateFlexibility, preference,
+      isDiscoveryMode, maxPrice,
+    } = req.body;
 
-  if (!userId || !origin || !destination) {
-    return res.status(400).json({ error: 'userId, origin e destination são obrigatórios' });
+    if (!userId || !origin || !destination)
+      return res.status(400).json({ error: 'userId, origin e destination são obrigatórios' });
+
+    if (!IATA_REGEX.test(origin.toUpperCase()))
+      return res.status(400).json({ error: 'origin deve ser um código IATA válido (ex: GRU)' });
+
+    if (destination !== 'FLEXIBLE' && !IATA_REGEX.test(destination.toUpperCase()))
+      return res.status(400).json({ error: 'destination deve ser um código IATA válido ou "FLEXIBLE"' });
+
+    // Verifica se usuário existe
+    const userDoc = await firestore.collection('users').doc(userId).get();
+    if (!userDoc.exists) return res.status(404).json({ error: 'Usuário não encontrado' });
+
+    const id     = uuidv4();
+    const search = {
+      id,
+      user_id:           userId,
+      origin:            origin.toUpperCase(),
+      destination:       destination.toUpperCase(),
+      destination_label: destinationLabel || destination,
+      travel_date:       travelDate       || null,
+      date_flexibility:  dateFlexibility  || 3,
+      preference:        preference       || 'cheapest',
+      is_discovery_mode: !!isDiscoveryMode,
+      max_price:         maxPrice         || null,
+      is_active:         true,
+      created_at:        new Date().toISOString(),
+      last_checked_at:   null,
+    };
+
+    await firestore.collection('searches').doc(id).set(search);
+    res.status(201).json(search);
+  } catch (err) {
+    console.error('/searches POST erro:', err);
+    res.status(500).json({ error: err.message });
   }
-
-  // Verifica se usuário existe
-  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(userId);
-  if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
-
-  const id = uuidv4();
-  db.prepare(`
-    INSERT INTO searches (
-      id, user_id, origin, destination, destination_label,
-      travel_date, date_flexibility, preference, is_discovery_mode, max_price
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    id, userId, origin.toUpperCase(), destination.toUpperCase(),
-    destinationLabel || destination, travelDate || null,
-    dateFlexibility || 3, preference || 'cheapest',
-    isDiscoveryMode ? 1 : 0, maxPrice || null
-  );
-
-  const search = db.prepare('SELECT * FROM searches WHERE id = ?').get(id);
-  res.status(201).json(search);
 });
 
 // Ativar/pausar busca
-router.patch('/searches/:id', (req, res) => {
-  const { isActive } = req.body;
-  db.prepare('UPDATE searches SET is_active = ? WHERE id = ?').run(isActive ? 1 : 0, req.params.id);
-  const search = db.prepare('SELECT * FROM searches WHERE id = ?').get(req.params.id);
-  res.json(search);
+router.patch('/searches/:id', async (req, res) => {
+  try {
+    const { isActive } = req.body;
+    const ref = firestore.collection('searches').doc(req.params.id);
+    await ref.update({ is_active: !!isActive });
+    const doc = await ref.get();
+    res.json({ id: doc.id, ...doc.data() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// Deletar busca
-router.delete('/searches/:id', (req, res) => {
-  db.prepare('DELETE FROM price_history WHERE search_id = ?').run(req.params.id);
-  db.prepare('DELETE FROM alerts_sent WHERE search_id = ?').run(req.params.id);
-  db.prepare('DELETE FROM searches WHERE id = ?').run(req.params.id);
-  res.json({ success: true });
+// Deletar busca (com cascata manual)
+router.delete('/searches/:id', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    const searchId   = req.params.id;
+
+    if (!userId) return res.status(400).json({ error: 'userId é obrigatório' });
+
+    const searchDoc = await firestore.collection('searches').doc(searchId).get();
+    if (!searchDoc.exists) return res.status(404).json({ error: 'Busca não encontrada' });
+    if (searchDoc.data().user_id !== userId) return res.status(403).json({ error: 'Acesso negado' });
+
+    // Deleta histórico de preços
+    const histSnap = await firestore.collection('price_history').where('search_id', '==', searchId).get();
+    const alertSnap = await firestore.collection('alerts_sent').where('search_id', '==', searchId).get();
+
+    const batch = firestore.batch();
+    histSnap.docs.forEach(d  => batch.delete(d.ref));
+    alertSnap.docs.forEach(d => batch.delete(d.ref));
+    batch.delete(firestore.collection('searches').doc(searchId));
+    await batch.commit();
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('/searches DELETE erro:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Histórico de preços de uma busca
-router.get('/searches/:id/history', (req, res) => {
-  const { days = 30 } = req.query;
-  const history = getPriceHistory(req.params.id, parseInt(days));
-  const stats = calculateStats(history);
-  res.json({ history, stats });
+router.get('/searches/:id/history', async (req, res) => {
+  try {
+    const days    = parseInt(req.query.days || 30);
+    const history = await getPriceHistory(req.params.id, days);
+    const stats   = calculateStats(history);
+    res.json({ history, stats });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// ==========================================
+// ─────────────────────────────────────────────────────────────
 // ALERTAS ENVIADOS
-// ==========================================
+// ─────────────────────────────────────────────────────────────
 
-router.get('/alerts', (req, res) => {
-  const { userId } = req.query;
+router.get('/alerts', async (req, res) => {
+  try {
+    const { userId } = req.query;
 
-  const alerts = db.prepare(`
-    SELECT 
-      a.*,
-      s.origin, s.destination, s.destination_label,
-      ph.price, ph.airline, ph.departure_datetime
-    FROM alerts_sent a
-    JOIN searches s ON s.id = a.search_id
-    JOIN price_history ph ON ph.id = a.price_history_id
-    ${userId ? 'WHERE a.user_id = ?' : ''}
-    ORDER BY a.sent_at DESC
-    LIMIT 50
-  `).all(userId ? [userId] : []);
+    let query = firestore.collection('alerts_sent').orderBy('sent_at', 'desc').limit(50);
+    if (userId) query = firestore.collection('alerts_sent').where('user_id', '==', userId).orderBy('sent_at', 'desc').limit(50);
 
-  res.json(alerts);
+    const snap = await query.get();
+
+    // Enriquece com dados da busca e do preço
+    const alerts = await Promise.all(snap.docs.map(async d => {
+      const alert     = { id: d.id, ...d.data() };
+      const searchDoc = await firestore.collection('searches').doc(alert.search_id).get();
+      const priceDoc  = await firestore.collection('price_history').doc(alert.price_history_id).get();
+      const search    = searchDoc.exists ? searchDoc.data() : {};
+      const price     = priceDoc.exists  ? priceDoc.data()  : {};
+      return {
+        ...alert,
+        origin:             search.origin,
+        destination:        search.destination,
+        destination_label:  search.destination_label,
+        price:              price.price,
+        airline:            price.airline,
+        departure_datetime: price.departure_datetime,
+      };
+    }));
+
+    res.json(alerts);
+  } catch (err) {
+    console.error('/alerts GET erro:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// ==========================================
+// ─────────────────────────────────────────────────────────────
 // UTILITÁRIOS
-// ==========================================
+// ─────────────────────────────────────────────────────────────
 
-// Interpretar input vago com IA
 router.post('/interpret', async (req, res) => {
-  const { input } = req.body;
-  if (!input) return res.status(400).json({ error: 'input é obrigatório' });
-  const result = await interpretUserInput(input);
-  res.json(result);
+  try {
+    const { input } = req.body;
+    if (!input) return res.status(400).json({ error: 'input é obrigatório' });
+    const result = await interpretUserInput(input);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// Busca manual de preço (para testar)
 router.post('/search-now', async (req, res) => {
-  const { origin, destination, travelDate } = req.body;
-  const result = await searchFlight({ origin, destination, travel_date: travelDate });
-  res.json(result);
+  try {
+    const { origin, destination, travelDate } = req.body;
+    const result = await searchFlight({ origin, destination, travel_date: travelDate });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// Busca de descoberta
 router.get('/discovery', async (req, res) => {
-  const { origin = 'GRU', limit = 5 } = req.query;
-  const results = await searchDiscoveryFlights(origin);
-  res.json(results.slice(0, parseInt(limit)));
+  try {
+    const { origin = 'GRU', limit = 5 } = req.query;
+    const results = await searchDiscoveryFlights(origin);
+    res.json(results.slice(0, parseInt(limit)));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// Trigger manual do job (admin/dev)
 router.post('/trigger-check', async (req, res) => {
   res.json({ message: 'Verificação iniciada em background' });
   runPriceCheck().catch(console.error);
 });
 
 // Health check
-router.get('/health', (req, res) => {
-  const userCount = db.prepare('SELECT COUNT(*) as c FROM users').get().c;
-  const searchCount = db.prepare('SELECT COUNT(*) as c FROM searches WHERE is_active = 1').get().c;
-  const alertCount = db.prepare('SELECT COUNT(*) as c FROM alerts_sent').get().c;
-  res.json({
-    status: 'ok',
-    stats: { users: userCount, activeSearches: searchCount, alertsSent: alertCount },
-    timestamp: new Date().toISOString(),
-  });
+router.get('/health', async (req, res) => {
+  try {
+    const [usersSnap, searchesSnap, alertsSnap] = await Promise.all([
+      firestore.collection('users').count().get(),
+      firestore.collection('searches').where('is_active', '==', true).count().get(),
+      firestore.collection('alerts_sent').count().get(),
+    ]);
+    res.json({
+      status: 'ok',
+      db: 'firestore',
+      stats: {
+        users:         usersSnap.data().count,
+        activeSearches: searchesSnap.data().count,
+        alertsSent:    alertsSnap.data().count,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(500).json({ status: 'error', error: err.message });
+  }
 });
 
 module.exports = router;

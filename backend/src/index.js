@@ -1,12 +1,11 @@
 // src/index.js
 require('dotenv').config();
 const express = require('express');
-const cors = require('cors');
-const { initializeDatabase } = require('./config/database');
-const routes = require('./routes');
+const cors    = require('cors');
+const routes  = require('./routes');
 const { startScheduler } = require('./jobs/priceMonitor');
 
-const app = express();
+const app  = express();
 const PORT = process.env.PORT || 3001;
 
 // Middlewares
@@ -17,11 +16,9 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Logging simples
+// Logging
 app.use((req, res, next) => {
-  if (req.path !== '/api/health') {
-    console.log(`${req.method} ${req.path}`);
-  }
+  if (req.path !== '/api/health') console.log(`${req.method} ${req.path}`);
   next();
 });
 
@@ -29,38 +26,37 @@ app.use((req, res, next) => {
 app.use('/api', routes);
 
 // 404
-app.use((req, res) => {
-  res.status(404).json({ error: 'Rota não encontrada' });
-});
+app.use((req, res) => res.status(404).json({ error: 'Rota não encontrada' }));
 
 // Error handler
 app.use((err, req, res, next) => {
   console.error('Erro:', err);
-  res.status(500).json({ error: 'Erro interno do servidor', detail: err.message });
+  res.status(500).json({ error: 'Erro interno', detail: err.message });
 });
 
-// Inicialização
 async function start() {
   try {
-    // 1. Inicializa banco
-    initializeDatabase();
+    // Valida que as variáveis do Firebase estão presentes
+    const required = ['FIREBASE_PROJECT_ID', 'FIREBASE_CLIENT_EMAIL', 'FIREBASE_PRIVATE_KEY'];
+    const missing  = required.filter(k => !process.env[k]);
+    if (missing.length) {
+      throw new Error(`Variáveis de ambiente ausentes: ${missing.join(', ')}`);
+    }
 
-    // 2. Inicia servidor
-    await new Promise((resolve, reject) => {
-      app.listen(PORT, (err) => {
-        if (err) return reject(err);
-        console.log(`\n🚀 Radar de Passagens API rodando em http://localhost:${PORT}`);
-        console.log(`📊 Health: http://localhost:${PORT}/api/health`);
-        console.log(`🌐 Modo: ${process.env.USE_MOCK_API === 'true' ? 'MOCK (sem API real)' : 'API REAL'}`);
-        resolve();
-      });
+    // Testa a conexão com o Firestore
+    const { firestore } = require('./config/firestore');
+    await firestore.collection('_health').doc('ping').set({ ts: new Date().toISOString() });
+    console.log('✅ Firestore conectado');
+
+    app.listen(PORT, () => {
+      console.log(`\n🚀 Radar de Passagens API em http://localhost:${PORT}`);
+      console.log(`📊 Health: http://localhost:${PORT}/api/health`);
+      console.log(`🌐 Modo: ${process.env.USE_MOCK_API === 'true' ? 'MOCK' : 'API REAL'}`);
     });
 
-    // 3. Inicia scheduler
     startScheduler();
-
   } catch (err) {
-    console.error('❌ Falha ao iniciar:', err);
+    console.error('❌ Falha ao iniciar:', err.message);
     process.exit(1);
   }
 }
